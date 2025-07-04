@@ -1,100 +1,108 @@
+# --- Structural Bayesian Inference (修复均值 + CI + 归一化) ---
+
 import numpy as np
 import pandas as pd
 from scipy.integrate import simpson
 from scipy.special import logsumexp
 import matplotlib.pyplot as plt
 
-# === Step 1: Define Parameter Grid ===
+# --- 参数网格 ---
 K_vals = np.linspace(0.85, 0.95, 51)
 D_vals = np.linspace(0.05, 0.09, 41)
-S_vals = np.linspace(0.45, 0.55, 21)
+sigma_vals = np.linspace(0.45, 0.55, 21)
 t_vals = np.linspace(1e-3, 50, 3000)
 
-dk, dd, ds = K_vals[1] - K_vals[0], D_vals[1] - D_vals[0], S_vals[1] - S_vals[0]
+dk = K_vals[1] - K_vals[0]
+dd = D_vals[1] - D_vals[0]
+ds = sigma_vals[1] - sigma_vals[0]
+volume_element = dk * dd * ds
 
-# === Step 2: Generate Synthetic Observation ===
-K_true, D_true, S_true = 0.91, 0.07, 0.5
-def joint_density(t, K, D, S):
-    pK = K * t**(K-1) * np.exp(-t)
-    fD = np.exp(-D * t)
-    fS = np.exp(-t**2 / (2 * S**2))
-    joint = pK * fD * fS
+# --- 生成观测数据 ---
+K_true, D_true, sigma_true = 0.91, 0.07, 0.5
+
+def joint_density(t, K, D, sigma):
+    p_K = K * t**(K - 1) * np.exp(-t)
+    f_D = np.exp(-D * t)
+    f_sigma = np.exp(-t**2 / (2 * sigma**2))
+    joint = p_K * f_D * f_sigma
     return joint / simpson(joint, t)
 
-joint_true = joint_density(t_vals, K_true, D_true, S_true)
-cdf = np.cumsum(joint_true); cdf /= cdf[-1]
-t_obs = np.interp(np.random.rand(200), cdf, t_vals)
+joint_true = joint_density(t_vals, K_true, D_true, sigma_true)
+cdf = np.cumsum(joint_true)
+cdf /= cdf[-1]
+t_obs = np.interp(np.random.rand(300), cdf, t_vals)
 
-# === Step 3: Evaluate Log-Posterior ===
+# --- 后验计算 ---
 results = []
 for K in K_vals:
     for D in D_vals:
-        for S in S_vals:
-            p = joint_density(t_vals, K, D, S)
-            logp = np.log(p + 1e-20)
-            interp = np.interp(t_obs, t_vals, logp)
-            log_like = np.sum(interp)
-            results.append((K, D, S, log_like))
+        for sigma in sigma_vals:
+            joint = joint_density(t_vals, K, D, sigma)
+            log_joint = np.log(joint + 1e-20)
+            interp_log_joint = np.interp(t_obs, t_vals, log_joint)
+            log_like = np.sum(interp_log_joint)
+            results.append((K, D, sigma, log_like))
 
 df = pd.DataFrame(results, columns=["K", "D", "Sigma", "LogPosterior"])
-
-# === Step 4: Normalize Posterior ===
 logZ = logsumexp(df["LogPosterior"])
 df["Normalized_Posterior"] = np.exp(df["LogPosterior"] - logZ)
 
-# === Step 5: MAP + Mean Estimate
-map_row = df.loc[df["Normalized_Posterior"].idxmax()]
-mean_K = np.sum(df["K"] * df["Normalized_Posterior"]) * dk * dd * ds
-mean_D = np.sum(df["D"] * df["Normalized_Posterior"]) * dk * dd * ds
-mean_S = np.sum(df["Sigma"] * df["Normalized_Posterior"]) * dk * dd * ds
+# --- 归一化检查 ---
+norm_sum = df["Normalized_Posterior"].sum()
+integral = norm_sum * volume_element
+print(f"✅ Normalization Check (sum): {norm_sum}")
+print(f"✅ Posterior Integral (Simpson approx): {integral}")
 
-# === Step 6: Marginal Distributions
-marg_K = df.groupby("K")["Normalized_Posterior"].sum() * dd * ds
-marg_D = df.groupby("D")["Normalized_Posterior"].sum() * dk * ds
-marg_S = df.groupby("Sigma")["Normalized_Posterior"].sum() * dk * dd
-
-def credible_interval(x, px, alpha=0.95):
-    px = px / np.sum(px)
-    sorted_idx = np.argsort(px)[::-1]
-    cum = 0
-    mask = np.zeros_like(px, dtype=bool)
-    for i in sorted_idx:
-        cum += px[i]
-        mask[i] = True
-        if cum >= alpha:
-            break
-    return np.min(x[mask]), np.max(x[mask])
-
-K_low, K_high = credible_interval(marg_K.index.values, marg_K.values)
-D_low, D_high = credible_interval(marg_D.index.values, marg_D.values)
-S_low, S_high = credible_interval(marg_S.index.values, marg_S.values)
-
-# === Step 7: Print Results ===
-print("✅ Normalization Check (sum):", df["Normalized_Posterior"].sum())
-print("✅ Posterior Integral (Simpson approx):", df["Normalized_Posterior"].sum() * dk * dd * ds)
+# --- MAP ---
+map_idx = df["Normalized_Posterior"].idxmax()
+map_row = df.loc[map_idx]
 print("🔍 MAP Estimate:\n", map_row)
-print("📈 Posterior Mean Estimates:\n",
-      f"K: {mean_K:.5f}, D: {mean_D:.5f}, σ: {mean_S:.5f}")
-print("📊 95% Credible Intervals:\n",
-      f"K ∈ [{K_low:.3f}, {K_high:.3f}]\n",
-      f"D ∈ [{D_low:.3f}, {D_high:.3f}]\n",
-      f"σ ∈ [{S_low:.3f}, {S_high:.3f}]")
 
-# === Step 8: Plot Marginals
+# --- Posterior Mean Estimates（修复版） ---
+mean_K = np.sum(df['K'] * df['Normalized_Posterior'])
+mean_D = np.sum(df['D'] * df['Normalized_Posterior'])
+mean_Sigma = np.sum(df['Sigma'] * df['Normalized_Posterior'])
+print("📈 Posterior Mean Estimates:")
+print(f" K: {mean_K:.5f}, D: {mean_D:.5f}, σ: {mean_Sigma:.5f}")
+
+# --- 95% Credible Intervals ---
+def get_credible_interval(grouped):
+    sorted_vals = grouped.sort_values(ascending=False)
+    cumulative = np.cumsum(sorted_vals.values)
+    cumulative /= cumulative[-1]
+    mask = cumulative <= 0.95
+    values = sorted_vals.index[mask]
+    return float(np.min(values)), float(np.max(values))
+
+marg_K = df.groupby("K")["Normalized_Posterior"].sum()
+marg_D = df.groupby("D")["Normalized_Posterior"].sum()
+marg_S = df.groupby("Sigma")["Normalized_Posterior"].sum()
+
+ci_K = get_credible_interval(marg_K)
+ci_D = get_credible_interval(marg_D)
+ci_S = get_credible_interval(marg_S)
+
+print("📊 95% Credible Intervals:")
+print(f" K ∈ [{ci_K[0]:.3f}, {ci_K[1]:.3f}]")
+print(f" D ∈ [{ci_D[0]:.3f}, {ci_D[1]:.3f}]")
+print(f" σ ∈ [{ci_S[0]:.3f}, {ci_S[1]:.3f}]")
+
+# --- 可视化边缘后验 ---
 plt.figure(figsize=(12, 3.5))
 plt.subplot(1, 3, 1)
-plt.plot(marg_K.index, marg_K.values); plt.title("Marginal p(K)"); plt.grid(True)
-plt.axvline(mean_K, color="gray", linestyle="--", label="mean")
-plt.axvline(map_row["K"], color="red", linestyle=":", label="MAP")
+plt.plot(marg_K.index, marg_K.values * dd * ds)
+plt.title("Marginal p(K)")
+plt.grid(True)
 
 plt.subplot(1, 3, 2)
-plt.plot(marg_D.index, marg_D.values); plt.title("Marginal p(D)"); plt.grid(True)
-plt.axvline(mean_D, color="gray", linestyle="--")
-plt.axvline(map_row["D"], color="red", linestyle=":")
+plt.plot(marg_D.index, marg_D.values * dk * ds)
+plt.title("Marginal p(D)")
+plt.grid(True)
 
 plt.subplot(1, 3, 3)
-plt.plot(marg_S.index, marg_S.values); plt.title("Marginal p(σ)"); plt.grid(True)
-plt.axvline(mean_S, color="gray", linestyle="--")
-plt.axvline(map_row["Sigma"], color="red", linestyle=":")
+plt.plot(marg_S.index, marg_S.values * dk * dd)
+plt.title("Marginal p(σ)")
+plt.grid(True)
 
-plt.tight_layout(); plt.legend(); plt.show()
+plt.tight_layout()
+plt.show()
